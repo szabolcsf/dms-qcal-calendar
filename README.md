@@ -17,7 +17,7 @@ A DankBar widget that shows upcoming CalDAV calendar events with a full popout p
 
 ## Bar Display
 
-Shows the number of upcoming events (e.g. `3`) with a calendar icon. Updates automatically on the configured refresh interval.
+Shows the next upcoming event with a calendar icon. Updates automatically on the configured refresh interval.
 
 ## Popout Panel
 
