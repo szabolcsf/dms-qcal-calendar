@@ -1,0 +1,3 @@
+[submodule "qcal"]
+	path = qcal
+	url = https://github.com/psic4t/qcal.git
