@@ -1,7 +1,7 @@
 {
   "id": "qcalCalendar",
   "name": "qCal Calendar",
-  "description": "CalDAV calendar widget powered by qcal. Works with iCloud, Google, Nextcloud, and any CalDAV server. Shows upcoming events, sends notifications, and supports adding new events directly from the bar.",
+  "description": "CalDAV calendar with events, notifications, and event management",
   "version": "1.0.0",
   "author": "Szabolcs Fazekas",
   "icon": "calendar_month",
