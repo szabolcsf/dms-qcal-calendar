@@ -5,6 +5,8 @@ A DankBar widget that shows upcoming CalDAV calendar events with a full popout p
 ![type:widget](https://img.shields.io/badge/type-widget-blue)
 ![capability:dankbar-widget](https://img.shields.io/badge/capability-dankbar--widget-green)
 
+![screenshot](screenshot.png)
+
 ## Features
 
 - Works with iCloud, Google, Nextcloud, and any CalDAV server
