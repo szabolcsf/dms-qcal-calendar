@@ -1111,6 +1111,8 @@ PluginComponent {
                             validator: IntValidator { bottom: 0; top: 23 }
                             onEditingFinished: parent.parent.applyTime("start", "h", text)
                             onActiveFocusChanged: if (activeFocus) selectAll()
+                            Keys.onTabPressed: startMinInput.forceActiveFocus()
+                            onTextChanged: if (activeFocus && text.length === 2) startMinInput.forceActiveFocus()
                         }
                         DankActionButton {
                             anchors.horizontalCenter: parent.horizontalCenter
@@ -1151,6 +1153,8 @@ PluginComponent {
                             validator: IntValidator { bottom: 0; top: 59 }
                             onEditingFinished: parent.parent.applyTime("start", "m", text)
                             onActiveFocusChanged: if (activeFocus) selectAll()
+                            Keys.onTabPressed: endHourInput.forceActiveFocus()
+                            onTextChanged: if (activeFocus && text.length === 2) endHourInput.forceActiveFocus()
                         }
                         DankActionButton {
                             anchors.horizontalCenter: parent.horizontalCenter
@@ -1193,6 +1197,8 @@ PluginComponent {
                             validator: IntValidator { bottom: 0; top: 23 }
                             onEditingFinished: parent.parent.applyTime("end", "h", text)
                             onActiveFocusChanged: if (activeFocus) selectAll()
+                            Keys.onTabPressed: endMinInput.forceActiveFocus()
+                            onTextChanged: if (activeFocus && text.length === 2) endMinInput.forceActiveFocus()
                         }
                         DankActionButton {
                             anchors.horizontalCenter: parent.horizontalCenter
@@ -1233,6 +1239,7 @@ PluginComponent {
                             validator: IntValidator { bottom: 0; top: 59 }
                             onEditingFinished: parent.parent.applyTime("end", "m", text)
                             onActiveFocusChanged: if (activeFocus) selectAll()
+                            Keys.onTabPressed: event.accepted = true
                         }
                         DankActionButton {
                             anchors.horizontalCenter: parent.horizontalCenter
@@ -1526,12 +1533,15 @@ PluginComponent {
                         spacing: 2
                         DankActionButton { anchors.horizontalCenter: parent.horizontalCenter; iconName: "keyboard_arrow_up"; iconSize: 12; buttonSize: 20; iconColor: Theme.withAlpha(Theme.surfaceText, 0.5); onClicked: root.editStartDate = new Date(root.editStartDate.getTime() + 3600000) }
                         TextInput {
+                            id: editStartHourInput
                             width: 28; height: 20; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
                             text: parent.parent.startHH; font.pixelSize: Theme.fontSizeSmall; font.family: "monospace"; color: Theme.surfaceText
                             maximumLength: 2; inputMethodHints: Qt.ImhDigitsOnly; selectByMouse: true
                             validator: IntValidator { bottom: 0; top: 23 }
                             onEditingFinished: parent.parent.applyTime("start", "h", text)
                             onActiveFocusChanged: if (activeFocus) selectAll()
+                            Keys.onTabPressed: editStartMinInput.forceActiveFocus()
+                            onTextChanged: if (activeFocus && text.length === 2) editStartMinInput.forceActiveFocus()
                         }
                         DankActionButton { anchors.horizontalCenter: parent.horizontalCenter; iconName: "keyboard_arrow_down"; iconSize: 12; buttonSize: 20; iconColor: Theme.withAlpha(Theme.surfaceText, 0.5); onClicked: root.editStartDate = new Date(root.editStartDate.getTime() - 3600000) }
                     }
@@ -1542,12 +1552,15 @@ PluginComponent {
                         spacing: 2
                         DankActionButton { anchors.horizontalCenter: parent.horizontalCenter; iconName: "keyboard_arrow_up"; iconSize: 12; buttonSize: 20; iconColor: Theme.withAlpha(Theme.surfaceText, 0.5); onClicked: root.editStartDate = new Date(root.editStartDate.getTime() + 300000) }
                         TextInput {
+                            id: editStartMinInput
                             width: 28; height: 20; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
                             text: parent.parent.startMM; font.pixelSize: Theme.fontSizeSmall; font.family: "monospace"; color: Theme.surfaceText
                             maximumLength: 2; inputMethodHints: Qt.ImhDigitsOnly; selectByMouse: true
                             validator: IntValidator { bottom: 0; top: 59 }
                             onEditingFinished: parent.parent.applyTime("start", "m", text)
                             onActiveFocusChanged: if (activeFocus) selectAll()
+                            Keys.onTabPressed: editEndHourInput.forceActiveFocus()
+                            onTextChanged: if (activeFocus && text.length === 2) editEndHourInput.forceActiveFocus()
                         }
                         DankActionButton { anchors.horizontalCenter: parent.horizontalCenter; iconName: "keyboard_arrow_down"; iconSize: 12; buttonSize: 20; iconColor: Theme.withAlpha(Theme.surfaceText, 0.5); onClicked: root.editStartDate = new Date(root.editStartDate.getTime() - 300000) }
                     }
@@ -1560,12 +1573,15 @@ PluginComponent {
                         spacing: 2
                         DankActionButton { anchors.horizontalCenter: parent.horizontalCenter; iconName: "keyboard_arrow_up"; iconSize: 12; buttonSize: 20; iconColor: Theme.withAlpha(Theme.surfaceText, 0.5); onClicked: root.editEndDate = new Date(root.editEndDate.getTime() + 3600000) }
                         TextInput {
+                            id: editEndHourInput
                             width: 28; height: 20; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
                             text: parent.parent.endHH; font.pixelSize: Theme.fontSizeSmall; font.family: "monospace"; color: Theme.surfaceText
                             maximumLength: 2; inputMethodHints: Qt.ImhDigitsOnly; selectByMouse: true
                             validator: IntValidator { bottom: 0; top: 23 }
                             onEditingFinished: parent.parent.applyTime("end", "h", text)
                             onActiveFocusChanged: if (activeFocus) selectAll()
+                            Keys.onTabPressed: editEndMinInput.forceActiveFocus()
+                            onTextChanged: if (activeFocus && text.length === 2) editEndMinInput.forceActiveFocus()
                         }
                         DankActionButton { anchors.horizontalCenter: parent.horizontalCenter; iconName: "keyboard_arrow_down"; iconSize: 12; buttonSize: 20; iconColor: Theme.withAlpha(Theme.surfaceText, 0.5); onClicked: root.editEndDate = new Date(root.editEndDate.getTime() - 3600000) }
                     }
@@ -1576,12 +1592,14 @@ PluginComponent {
                         spacing: 2
                         DankActionButton { anchors.horizontalCenter: parent.horizontalCenter; iconName: "keyboard_arrow_up"; iconSize: 12; buttonSize: 20; iconColor: Theme.withAlpha(Theme.surfaceText, 0.5); onClicked: root.editEndDate = new Date(root.editEndDate.getTime() + 300000) }
                         TextInput {
+                            id: editEndMinInput
                             width: 28; height: 20; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
                             text: parent.parent.endMM; font.pixelSize: Theme.fontSizeSmall; font.family: "monospace"; color: Theme.surfaceText
                             maximumLength: 2; inputMethodHints: Qt.ImhDigitsOnly; selectByMouse: true
                             validator: IntValidator { bottom: 0; top: 59 }
                             onEditingFinished: parent.parent.applyTime("end", "m", text)
                             onActiveFocusChanged: if (activeFocus) selectAll()
+                            Keys.onTabPressed: event.accepted = true
                         }
                         DankActionButton { anchors.horizontalCenter: parent.horizontalCenter; iconName: "keyboard_arrow_down"; iconSize: 12; buttonSize: 20; iconColor: Theme.withAlpha(Theme.surfaceText, 0.5); onClicked: root.editEndDate = new Date(root.editEndDate.getTime() - 300000) }
                     }

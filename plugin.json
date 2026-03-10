@@ -2,7 +2,7 @@
   "id": "qcalCalendar",
   "name": "qCal Calendar",
   "description": "CalDAV calendar with events, notifications, and event management",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Szabolcs Fazekas",
   "icon": "calendar_month",
   "type": "widget",
