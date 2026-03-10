@@ -17,7 +17,11 @@ err()   { printf "${RED}[!]${NC} %s\n" "$1" >&2; }
 if [[ ! -x "$QCAL_BIN" ]]; then
     info "Building qcal..."
     if ! command -v go &>/dev/null; then
-        err "Go is not installed. Install it with: yay -S go"
+        err "Go is not installed. Install it for your distro:"
+        echo "  Arch:          pacman -S go"
+        echo "  Fedora:        dnf install golang"
+        echo "  openSUSE:      zypper install go"
+        echo "  Ubuntu/Debian: apt install golang-go"
         exit 1
     fi
     (cd "$SCRIPT_DIR/qcal" && make)
