@@ -199,6 +199,17 @@ def google_list_events(account, calendar_id, time_min, time_max):
             start_iso = _normalize_google_dt(start.get("dateTime", ""))
             end_iso = _normalize_google_dt(end.get("dateTime", ""))
 
+        meet_link = item.get("hangoutLink", "")
+        if not meet_link:
+            for ep in item.get("conferenceData", {}).get("entryPoints", []):
+                if ep.get("entryPointType") == "video":
+                    meet_link = ep.get("uri", "")
+                    break
+
+        attendees_list = item.get("attendees", [])
+        rsvp_total = len(attendees_list)
+        rsvp_accepted = sum(1 for a in attendees_list if a.get("responseStatus") == "accepted")
+
         events.append({
             "title": item.get("summary", "(No title)"),
             "start": start_iso,
@@ -207,6 +218,9 @@ def google_list_events(account, calendar_id, time_min, time_max):
             "location": item.get("location", ""),
             "description": "",
             "filename": item.get("id", ""),
+            "meetLink": meet_link,
+            "rsvpAccepted": rsvp_accepted,
+            "rsvpTotal": rsvp_total,
         })
 
     return events
@@ -1151,6 +1165,8 @@ def cmd_notify(args):
                 body_parts.append(time_range)
         if ev.get("location"):
             body_parts.append(ev["location"])
+        if ev.get("meetLink"):
+            body_parts.append(ev["meetLink"])
 
         body = "\n".join(body_parts) if body_parts else ""
 

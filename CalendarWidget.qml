@@ -13,6 +13,9 @@ PluginComponent {
     property int refreshInterval: 5       // minutes
     property bool showLocation: true
     property bool showCalendarName: false
+    property bool showMeetLink: true
+    property string meetLinkAction: "copy"
+    property bool showRsvp: true
     property bool notificationsEnabled: true
     property int notifyMinutes: 15        // notify N minutes before event
     property string caldavUrl: ""
@@ -62,6 +65,8 @@ PluginComponent {
     property string _editOutput: ""
     property string _deleteOutput: ""
 
+    TextEdit { id: clipboardHelper; visible: false }
+
     property string wrapperPath: {
         var qmlPath = Qt.resolvedUrl(".");
         var dir = qmlPath.toString().replace(/^file:\/\//, "");
@@ -75,6 +80,9 @@ PluginComponent {
         refreshInterval = pluginService.loadPluginData(pluginId, "refreshInterval", 5) || 5;
         showLocation = pluginService.loadPluginData(pluginId, "showLocation", true) !== false;
         showCalendarName = pluginService.loadPluginData(pluginId, "showCalendarName", false) === true;
+        showMeetLink = pluginService.loadPluginData(pluginId, "showMeetLink", true) !== false;
+        meetLinkAction = pluginService.loadPluginData(pluginId, "meetLinkAction", "copy") || "copy";
+        showRsvp = pluginService.loadPluginData(pluginId, "showRsvp", true) !== false;
         notificationsEnabled = pluginService.loadPluginData(pluginId, "notificationsEnabled", true) !== false;
         notifyMinutes = pluginService.loadPluginData(pluginId, "notifyMinutes", 15) || 15;
         caldavUrl = pluginService.loadPluginData(pluginId, "caldavUrl", "") || "";
@@ -1720,6 +1728,36 @@ PluginComponent {
                                         elide: Text.ElideRight
                                     }
 
+                                    Row {
+                                        id: meetLinkRow
+                                        spacing: Theme.spacingXS
+                                        visible: root.showMeetLink && (modelData.meetLink || "") !== ""
+                                        width: parent.width
+
+                                        DankIcon {
+                                            name: "videocam"
+                                            size: 12
+                                            color: Theme.primary
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+
+                                        StyledText {
+                                            text: "Join Meet"
+                                            color: Theme.primary
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            font.weight: Font.Medium
+                                        }
+                                    }
+
+                                    StyledText {
+                                        text: modelData.rsvpAccepted + "/" + modelData.rsvpTotal + " accepted"
+                                        color: Theme.surfaceVariantText
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        visible: root.showRsvp && (modelData.rsvpTotal || 0) > 0
+                                        width: parent.width
+                                        elide: Text.ElideRight
+                                    }
+
                                     StyledText {
                                         text: root.calendarNameForIndex(modelData.calendarIndex)
                                         color: Theme.surfaceVariantText
@@ -1737,6 +1775,24 @@ PluginComponent {
                                     cursorShape: modelData.filename ? Qt.PointingHandCursor : Qt.ArrowCursor
                                     onClicked: {
                                         if (modelData.filename) root.openEditForm(modelData);
+                                    }
+                                }
+
+                                MouseArea {
+                                    x: meetLinkRow.parent.x + meetLinkRow.x
+                                    y: meetLinkRow.parent.y + meetLinkRow.y
+                                    width: meetLinkRow.width
+                                    height: meetLinkRow.height
+                                    visible: meetLinkRow.visible
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        if (root.meetLinkAction === "open")
+                                            Qt.openUrlExternally(modelData.meetLink);
+                                        else {
+                                            clipboardHelper.text = modelData.meetLink;
+                                            clipboardHelper.selectAll();
+                                            clipboardHelper.copy();
+                                        }
                                     }
                                 }
                             }
