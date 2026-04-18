@@ -589,7 +589,21 @@ PluginComponent {
 
     // ── Popout panel ────────────────────────────────────────────────
     popoutContent: Component {
+        Item {
+            implicitWidth: root.popoutWidth
+            implicitHeight: root.popoutHeight
+
+        Flickable {
+            anchors.fill: parent
+            contentWidth: parent.width
+            contentHeight: contentColumn.height
+            clip: true
+            flickableDirection: Flickable.VerticalFlick
+            boundsBehavior: Flickable.StopAtBounds
+
         Column {
+            id: contentColumn
+            width: parent.width
             spacing: Theme.spacingL
             Component.onCompleted: { root.showAddForm = false; root.showEditForm = false; }
 
@@ -1730,6 +1744,8 @@ PluginComponent {
                     }
                 }
             }
+        }
+        }
         }
     }
 

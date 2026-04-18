@@ -27,6 +27,12 @@ NOTIFY_STATE_FILE = os.path.join(
 
 KEYRING_SERVICE = "qcal-caldav"
 
+GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token"
+GOOGLE_AUTH_URI = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_CALENDAR_API = "https://www.googleapis.com/calendar/v3"
+GOOGLE_SCOPES = "https://www.googleapis.com/auth/calendar"
+GOOGLE_KEYRING_SERVICE = "qcal-google-oauth"
+
 
 def has_secret_tool() -> bool:
     """Check if secret-tool (libsecret CLI) is available."""
@@ -50,6 +56,447 @@ def keyring_store(username: str, password: str) -> bool:
 def keyring_lookup_cmd(username: str) -> str:
     """Return the shell command to look up a password from GNOME Keyring."""
     return f"secret-tool lookup service {KEYRING_SERVICE} account {username}"
+
+
+def google_store_refresh_token(account, refresh_token):
+    """Store Google OAuth refresh token in GNOME Keyring."""
+    try:
+        proc = subprocess.run(
+            ["secret-tool", "store", "--label", f"qcal Google ({account})",
+             "service", GOOGLE_KEYRING_SERVICE, "account", account],
+            input=refresh_token, capture_output=True, text=True, timeout=10,
+        )
+        return proc.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def google_get_refresh_token(account):
+    """Get Google OAuth refresh token from GNOME Keyring."""
+    try:
+        proc = subprocess.run(
+            ["secret-tool", "lookup", "service", GOOGLE_KEYRING_SERVICE,
+             "account", account],
+            capture_output=True, text=True, timeout=5,
+        )
+        return proc.stdout.strip()
+    except Exception:
+        return ""
+
+
+def _google_credentials(account):
+    """Return (client_id, client_secret) for a Google account from config.json."""
+    config = load_qcal_config()
+    acct_creds = config.get("GoogleOAuth", {}).get(account, {})
+    cid = acct_creds.get("ClientId", "")
+    csec = acct_creds.get("ClientSecret", "")
+    if not cid or not csec:
+        raise RuntimeError(
+            f"No OAuth credentials for {account}. "
+            f"Add ClientId/ClientSecret under GoogleOAuth in config.json"
+        )
+    return cid, csec
+
+
+def google_get_access_token(account):
+    """Exchange refresh token for a fresh access token."""
+    import urllib.request
+    import urllib.parse
+
+    refresh_token = google_get_refresh_token(account)
+    if not refresh_token:
+        return ""
+
+    client_id, client_secret = _google_credentials(account)
+    data = urllib.parse.urlencode({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token",
+    }).encode()
+
+    req = urllib.request.Request(GOOGLE_TOKEN_URI, data=data, method="POST")
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        return json.loads(resp.read().decode()).get("access_token", "")
+    except Exception:
+        return ""
+
+
+def google_api_request(account, endpoint, method="GET", body=None):
+    """Make a Google Calendar API request."""
+    import urllib.request
+    import urllib.error
+
+    token = google_get_access_token(account)
+    if not token:
+        return {"error": f"No valid token for {account}"}
+
+    url = f"{GOOGLE_CALENDAR_API}/{endpoint}"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    data = None
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(body).encode()
+
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        resp = urllib.request.urlopen(req, timeout=15)
+        if resp.status == 204:
+            return {}
+        return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        error_body = ""
+        try:
+            error_body = e.read().decode()[:200]
+        except Exception:
+            pass
+        return {"error": f"HTTP {e.code}: {error_body}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _normalize_google_dt(dt_str):
+    """Convert Google API RFC3339 datetime to local naive ISO format."""
+    if not dt_str or "T" not in dt_str:
+        return dt_str
+    try:
+        dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        return dt.astimezone().strftime("%Y-%m-%dT%H:%M:%S")
+    except (ValueError, OSError):
+        return dt_str
+
+
+def google_list_events(account, calendar_id, time_min, time_max):
+    """List events from a Google Calendar via REST API."""
+    import urllib.parse
+
+    params = urllib.parse.urlencode({
+        "timeMin": time_min,
+        "timeMax": time_max,
+        "singleEvents": "true",
+        "orderBy": "startTime",
+        "maxResults": 250,
+    })
+    cal_enc = urllib.parse.quote(calendar_id, safe="")
+    result = google_api_request(account, f"calendars/{cal_enc}/events?{params}")
+    if "error" in result:
+        return []
+
+    events = []
+    for item in result.get("items", []):
+        if item.get("status") == "cancelled":
+            continue
+        start = item.get("start", {})
+        end = item.get("end", {})
+
+        is_allday = "date" in start
+        if is_allday:
+            start_iso = start.get("date", "")
+            end_iso = end.get("date", "")
+        else:
+            start_iso = _normalize_google_dt(start.get("dateTime", ""))
+            end_iso = _normalize_google_dt(end.get("dateTime", ""))
+
+        events.append({
+            "title": item.get("summary", "(No title)"),
+            "start": start_iso,
+            "end": end_iso,
+            "allDay": is_allday,
+            "location": item.get("location", ""),
+            "description": "",
+            "filename": item.get("id", ""),
+        })
+
+    return events
+
+
+def google_list_calendars(account):
+    """List all calendars for a Google account via REST API."""
+    result = google_api_request(account, "users/me/calendarList")
+    if "error" in result:
+        return []
+    calendars = []
+    for item in result.get("items", []):
+        calendars.append({
+            "id": item.get("id", ""),
+            "name": item.get("summary", ""),
+            "accessRole": item.get("accessRole", "reader"),
+        })
+    return calendars
+
+
+def google_authorize(account):
+    """Run OAuth2 browser authorization flow for a Google account."""
+    import http.server
+    import webbrowser
+    import socket
+    import urllib.parse
+    import urllib.request
+
+    with socket.socket() as s:
+        s.bind(("", 0))
+        port = s.getsockname()[1]
+
+    redirect_uri = f"http://localhost:{port}"
+    auth_code = [None]
+    client_id, client_secret = _google_credentials(account)
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            from urllib.parse import urlparse, parse_qs
+            query = parse_qs(urlparse(self.path).query)
+            auth_code[0] = query.get("code", [None])[0]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(
+                b"<html><body><h1>Authorization successful!</h1>"
+                b"<p>You can close this tab.</p></body></html>"
+            )
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("localhost", port), Handler)
+
+    params = urllib.parse.urlencode({
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": GOOGLE_SCOPES,
+        "access_type": "offline",
+        "prompt": "consent",
+        "login_hint": account,
+    })
+    auth_url = f"{GOOGLE_AUTH_URI}?{params}"
+
+    print(f"Opening browser for Google authorization ({account})...")
+    print(f"If browser doesn't open, visit:\n{auth_url}")
+    webbrowser.open(auth_url)
+
+    server.handle_request()
+    server.server_close()
+
+    if not auth_code[0]:
+        print("Authorization failed: no code received", file=sys.stderr)
+        return False
+
+    data = urllib.parse.urlencode({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "code": auth_code[0],
+        "grant_type": "authorization_code",
+        "redirect_uri": redirect_uri,
+    }).encode()
+
+    req = urllib.request.Request(GOOGLE_TOKEN_URI, data=data, method="POST")
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        result = json.loads(resp.read().decode())
+        refresh_token = result.get("refresh_token", "")
+        if refresh_token and google_store_refresh_token(account, refresh_token):
+            print(f"Authorization successful for {account}")
+            return True
+        print("Failed to store refresh token", file=sys.stderr)
+        return False
+    except Exception as e:
+        print(f"Token exchange failed: {e}", file=sys.stderr)
+        return False
+
+
+def _google_add_event(args, config, gcal):
+    """Add event to a Google Calendar via REST API."""
+    import urllib.parse
+
+    account = gcal.get("Account", "")
+    cal_id = gcal.get("CalendarId", "")
+    tz = config.get("Timezone", "UTC")
+
+    parts = args.event_data.split(" ", 3)
+    date_str = parts[0]
+    body = {}
+
+    if len(parts) >= 4 and len(parts[1]) == 4 and parts[1].isdigit():
+        st, et, title = parts[1], parts[2], parts[3]
+        d = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+        body["start"] = {"dateTime": f"{d}T{st[:2]}:{st[2:]}:00", "timeZone": tz}
+        body["end"] = {"dateTime": f"{d}T{et[:2]}:{et[2:]}:00", "timeZone": tz}
+    else:
+        title = " ".join(parts[1:])
+        d = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+        body["start"] = {"date": d}
+        end_d = datetime.strptime(date_str, "%Y%m%d") + timedelta(days=1)
+        body["end"] = {"date": end_d.strftime("%Y-%m-%d")}
+
+    body["summary"] = title
+    if args.location:
+        body["location"] = args.location
+
+    cal_enc = urllib.parse.quote(cal_id, safe="")
+    result = google_api_request(
+        account, f"calendars/{cal_enc}/events", method="POST", body=body,
+    )
+    success = "id" in result
+    error = result.get("error", "") if not success else ""
+    json.dump({"success": success, "error": error}, sys.stdout)
+
+
+def _google_delete_event(args, gcal):
+    """Delete a Google Calendar event via REST API."""
+    import urllib.parse
+
+    account = gcal.get("Account", "")
+    cal_id = gcal.get("CalendarId", "")
+    cal_enc = urllib.parse.quote(cal_id, safe="")
+    event_id = args.filename
+
+    result = google_api_request(
+        account, f"calendars/{cal_enc}/events/{event_id}", method="DELETE",
+    )
+    success = "error" not in result
+    json.dump({
+        "success": success, "output": "", "error": result.get("error", ""),
+    }, sys.stdout)
+
+
+def _google_edit_event(args, config, gcal):
+    """Edit a Google Calendar event via REST API."""
+    import urllib.parse
+
+    account = gcal.get("Account", "")
+    cal_id = gcal.get("CalendarId", "")
+    tz = config.get("Timezone", "UTC")
+    cal_enc = urllib.parse.quote(cal_id, safe="")
+    event_id = args.filename
+
+    event = google_api_request(
+        account, f"calendars/{cal_enc}/events/{event_id}",
+    )
+    if "error" in event:
+        json.dump({"success": False, "error": event["error"]}, sys.stdout)
+        return
+
+    if args.title:
+        event["summary"] = args.title
+    if args.start_date and args.start_time:
+        d = f"{args.start_date[:4]}-{args.start_date[4:6]}-{args.start_date[6:8]}"
+        event["start"] = {
+            "dateTime": f"{d}T{args.start_time[:2]}:{args.start_time[2:]}:00",
+            "timeZone": tz,
+        }
+    elif args.start_date and args.all_day:
+        d = f"{args.start_date[:4]}-{args.start_date[4:6]}-{args.start_date[6:8]}"
+        event["start"] = {"date": d}
+    if args.end_date and args.end_time:
+        d = f"{args.end_date[:4]}-{args.end_date[4:6]}-{args.end_date[6:8]}"
+        event["end"] = {
+            "dateTime": f"{d}T{args.end_time[:2]}:{args.end_time[2:]}:00",
+            "timeZone": tz,
+        }
+    elif args.end_date and args.all_day:
+        d = f"{args.end_date[:4]}-{args.end_date[4:6]}-{args.end_date[6:8]}"
+        event["end"] = {"date": d}
+    if args.location is not None:
+        event["location"] = args.location
+
+    updated = google_api_request(
+        account, f"calendars/{cal_enc}/events/{event_id}",
+        method="PUT", body=event,
+    )
+    success = "id" in updated
+    error = updated.get("error", "") if not success else ""
+    json.dump({"success": success, "error": error}, sys.stdout)
+
+
+def _resolve_google_calendar(config, cal_index):
+    """Resolve a calendar index to a Google calendar entry, or None."""
+    num_caldav = len(config.get("Calendars", []))
+    google_cals = config.get("GoogleCalendars", [])
+    gi = cal_index - num_caldav
+    if 0 <= gi < len(google_cals):
+        return google_cals[gi]
+    return None
+
+
+def cmd_discover_google(args):
+    """Discover Google calendars and write them to qcal config."""
+    config_dir = os.path.join(os.environ.get("HOME", ""), ".config", "qcal")
+    config_path = os.path.join(config_dir, "config.json")
+    account = args.account
+
+    if not google_get_refresh_token(account):
+        if not args.authorize:
+            json.dump({
+                "success": False,
+                "error": f"No token for {account}. Run with --authorize.",
+                "calendars": [],
+            }, sys.stdout)
+            return
+        if not google_authorize(account):
+            json.dump({
+                "success": False, "error": "Authorization failed",
+                "calendars": [],
+            }, sys.stdout)
+            return
+
+    cals = google_list_calendars(account)
+    if not cals:
+        json.dump({
+            "success": False, "error": "No calendars found", "calendars": [],
+        }, sys.stdout)
+        return
+
+    os.makedirs(config_dir, exist_ok=True)
+    try:
+        with open(config_path) as f:
+            cfg = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        cfg = {}
+
+    try:
+        tz = subprocess.run(
+            ["timedatectl", "show", "-p", "Timezone", "--value"],
+            capture_output=True, text=True,
+        ).stdout.strip() or "UTC"
+    except Exception:
+        tz = "UTC"
+
+    cfg.setdefault("Timezone", tz)
+    cfg.setdefault("DefaultNumDays", 14)
+    cfg.setdefault("Calendars", [])
+
+    existing = cfg.get("GoogleCalendars", [])
+    kept = [c for c in existing if c.get("Account") != account]
+
+    new_entries = []
+    for cal in cals:
+        read_only = cal["accessRole"] in ("reader", "freeBusyReader")
+        name = re.sub(
+            r'[\U0001F000-\U0001FFFF\u2600-\u27BF\uFE00-\uFE0F\u200D]+',
+            '', cal["name"],
+        ).strip()
+        new_entries.append({
+            "Account": account,
+            "CalendarId": cal["id"],
+            "Name": name,
+            "ReadOnly": read_only,
+        })
+
+    cfg["GoogleCalendars"] = kept + new_entries
+
+    with open(config_path, "w") as f:
+        json.dump(cfg, f, indent=4)
+
+    if os.path.isfile(CAL_NAMES_CACHE):
+        os.remove(CAL_NAMES_CACHE)
+
+    json.dump({
+        "success": True,
+        "calendars": [c["name"] for c in cals],
+        "error": "",
+    }, sys.stdout)
 
 
 # ANSI escape code stripper
@@ -221,10 +668,11 @@ def cmd_list(args):
 
     # Query each calendar individually to get filenames and calendar indices
     config = load_qcal_config()
-    num_cals = len(config.get("Calendars", []))
+    caldav_cals = config.get("Calendars", [])
+    num_caldav = len(caldav_cals)
     all_events = []
 
-    for cal_idx in range(num_cals):
+    for cal_idx in range(num_caldav):
         output = run_qcal("-s", start_str, "-e", end_str, "-i", "-f", "-c", str(cal_idx))
         if not output:
             continue
@@ -232,6 +680,21 @@ def cmd_list(args):
         for ev in events:
             ev["calendarIndex"] = cal_idx
         all_events.extend(events)
+
+    # Fetch Google Calendar events via REST API
+    google_cals = config.get("GoogleCalendars", [])
+    if google_cals:
+        time_min = start.astimezone().isoformat()
+        time_max = end.astimezone().isoformat()
+        for i, gcal in enumerate(google_cals):
+            cal_idx = num_caldav + i
+            events = google_list_events(
+                gcal.get("Account", ""), gcal.get("CalendarId", ""),
+                time_min, time_max,
+            )
+            for ev in events:
+                ev["calendarIndex"] = cal_idx
+            all_events.extend(events)
 
     # Filter out yesterday's events that crept in from the off-by-one workaround
     today_str = now.strftime("%Y-%m-%d")
@@ -372,6 +835,16 @@ def get_calendar_names(config: dict) -> list[dict]:
         with open(CAL_NAMES_CACHE, "w") as f:
             json.dump(cached, f)
 
+    # Append Google calendars
+    num_caldav = len(config.get("Calendars", []))
+    for i, gcal in enumerate(config.get("GoogleCalendars", [])):
+        cals.append({
+            "index": num_caldav + i,
+            "name": gcal.get("Name", f"Google Calendar {i}"),
+            "url": f"google://{gcal.get('Account', '')}/{gcal.get('CalendarId', '')}",
+            "readOnly": gcal.get("ReadOnly", True),
+        })
+
     return cals
 
 
@@ -411,7 +884,7 @@ def cmd_calendars(args):
 
 
 def cmd_add(args):
-    """Add a new event via CalDAV PUT."""
+    """Add a new event via CalDAV PUT or Google REST API."""
     import urllib.request
     import urllib.error
     import ssl
@@ -420,6 +893,12 @@ def cmd_add(args):
 
     config = load_qcal_config()
     calendars = config.get("Calendars", [])
+
+    gcal = _resolve_google_calendar(config, args.calendar)
+    if gcal is not None:
+        _google_add_event(args, config, gcal)
+        return
+
     if args.calendar >= len(calendars):
         json.dump({"success": False, "error": "Invalid calendar index"}, sys.stdout)
         return
@@ -503,6 +982,12 @@ def cmd_add(args):
 
 def cmd_delete(args):
     """Delete an event by filename and calendar index."""
+    config = load_qcal_config()
+    gcal = _resolve_google_calendar(config, args.calendar)
+    if gcal is not None:
+        _google_delete_event(args, gcal)
+        return
+
     output = run_qcal("-delete", args.filename, "-c", str(args.calendar))
     stripped = output.strip()
     success = "204" in stripped or "200" in stripped
@@ -527,6 +1012,12 @@ def cmd_edit(args):
 
     config = load_qcal_config()
     calendars = config.get("Calendars", [])
+
+    gcal = _resolve_google_calendar(config, args.calendar)
+    if gcal is not None:
+        _google_edit_event(args, config, gcal)
+        return
+
     if args.calendar >= len(calendars):
         json.dump({"success": False, "error": "Invalid calendar index"}, sys.stdout)
         return
@@ -609,10 +1100,20 @@ def cmd_notify(args):
     end_str = end.strftime("%Y%m%dT%H%M%S")
 
     output = run_qcal("-s", start_str, "-e", end_str, "-i")
-    if not output:
-        return
+    events = parse_events(output) if output else []
 
-    events = parse_events(output)
+    # Also include Google Calendar events
+    config = load_qcal_config()
+    google_cals = config.get("GoogleCalendars", [])
+    if google_cals:
+        g_min = now.astimezone().isoformat()
+        g_max = end.astimezone().isoformat()
+        for gcal in google_cals:
+            events.extend(google_list_events(
+                gcal.get("Account", ""), gcal.get("CalendarId", ""),
+                g_min, g_max,
+            ))
+
     if not events:
         return
 
@@ -917,6 +1418,11 @@ def main():
     p_discover.add_argument("username", help="Account username")
     p_discover.add_argument("password", help="Account password")
 
+    p_dgoogle = sub.add_parser("discover-google")
+    p_dgoogle.add_argument("account", help="Google account email")
+    p_dgoogle.add_argument("--authorize", action="store_true",
+                           help="Start OAuth flow if no token exists")
+
     p_notify = sub.add_parser("notify")
     p_notify.add_argument("--minutes", type=int, default=15)
 
@@ -924,6 +1430,8 @@ def main():
 
     if args.command == "discover":
         cmd_discover(args)
+    elif args.command == "discover-google":
+        cmd_discover_google(args)
     elif args.command == "list":
         cmd_list(args)
     elif args.command == "calendars":
