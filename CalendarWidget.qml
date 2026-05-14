@@ -455,14 +455,53 @@ PluginComponent {
     }
 
     // ── Helpers ─────────────────────────────────────────────────────
+    property int _pillTick: 0
+
+    Timer {
+        interval: 60000
+        running: true
+        repeat: true
+        onTriggered: root._pillTick++
+    }
+
+    function _parseEventDate(isoStr) {
+        if (isoStr.indexOf("T") !== -1) {
+            var parts = isoStr.split("T");
+            var dp = parts[0].split("-");
+            var tp = parts[1].substring(0, 5).split(":");
+            return new Date(parseInt(dp[0]), parseInt(dp[1]) - 1, parseInt(dp[2]),
+                            parseInt(tp[0]), parseInt(tp[1]));
+        }
+        var dp = isoStr.split("-");
+        return new Date(parseInt(dp[0]), parseInt(dp[1]) - 1, parseInt(dp[2]));
+    }
+
+    function _findCurrentOrNextEvent() {
+        var now = new Date();
+        for (var i = 0; i < events.length; i++) {
+            var ev = events[i];
+            if (ev.allDay || ev.end.indexOf("T") === -1) {
+                var evDate = _parseEventDate(ev.start);
+                if (evDate.toDateString() === now.toDateString() ||
+                    evDate > now)
+                    return ev;
+                continue;
+            }
+            var endDt = _parseEventDate(ev.end);
+            if (endDt > now) return ev;
+        }
+        return null;
+    }
+
     function nextEventSummary() {
+        void(_pillTick);
         if (isLoading) return "Cal ...";
         if (hasError) return "Cal \u2013";
         if (events.length === 0) return "No events";
-        var ev = events[0];
+        var ev = _findCurrentOrNextEvent();
+        if (!ev) return "No events";
         var timeStr = formatEventTime(ev);
         var dayPrefix = eventDayPrefix(ev);
-        // Truncate title for bar pill
         var maxTitle = 20;
         var title = ev.title.length > maxTitle ? ev.title.substring(0, maxTitle - 2) + "\u2026" : ev.title;
         return dayPrefix + timeStr + " " + title;
