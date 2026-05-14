@@ -13,6 +13,9 @@ PluginComponent {
     property int refreshInterval: 5       // minutes
     property bool showLocation: true
     property bool showCalendarName: false
+    property bool showMeetLink: true
+    property string meetLinkAction: "copy"
+    property bool showRsvp: true
     property bool notificationsEnabled: true
     property int notifyMinutes: 15        // notify N minutes before event
     property string caldavUrl: ""
@@ -62,6 +65,8 @@ PluginComponent {
     property string _editOutput: ""
     property string _deleteOutput: ""
 
+    TextEdit { id: clipboardHelper; visible: false }
+
     property string wrapperPath: {
         var qmlPath = Qt.resolvedUrl(".");
         var dir = qmlPath.toString().replace(/^file:\/\//, "");
@@ -75,6 +80,9 @@ PluginComponent {
         refreshInterval = pluginService.loadPluginData(pluginId, "refreshInterval", 5) || 5;
         showLocation = pluginService.loadPluginData(pluginId, "showLocation", true) !== false;
         showCalendarName = pluginService.loadPluginData(pluginId, "showCalendarName", false) === true;
+        showMeetLink = pluginService.loadPluginData(pluginId, "showMeetLink", true) !== false;
+        meetLinkAction = pluginService.loadPluginData(pluginId, "meetLinkAction", "copy") || "copy";
+        showRsvp = pluginService.loadPluginData(pluginId, "showRsvp", true) !== false;
         notificationsEnabled = pluginService.loadPluginData(pluginId, "notificationsEnabled", true) !== false;
         notifyMinutes = pluginService.loadPluginData(pluginId, "notifyMinutes", 15) || 15;
         caldavUrl = pluginService.loadPluginData(pluginId, "caldavUrl", "") || "";
@@ -447,14 +455,53 @@ PluginComponent {
     }
 
     // ── Helpers ─────────────────────────────────────────────────────
+    property int _pillTick: 0
+
+    Timer {
+        interval: 60000
+        running: true
+        repeat: true
+        onTriggered: root._pillTick++
+    }
+
+    function _parseEventDate(isoStr) {
+        if (isoStr.indexOf("T") !== -1) {
+            var parts = isoStr.split("T");
+            var dp = parts[0].split("-");
+            var tp = parts[1].substring(0, 5).split(":");
+            return new Date(parseInt(dp[0]), parseInt(dp[1]) - 1, parseInt(dp[2]),
+                            parseInt(tp[0]), parseInt(tp[1]));
+        }
+        var dp = isoStr.split("-");
+        return new Date(parseInt(dp[0]), parseInt(dp[1]) - 1, parseInt(dp[2]));
+    }
+
+    function _findCurrentOrNextEvent() {
+        var now = new Date();
+        for (var i = 0; i < events.length; i++) {
+            var ev = events[i];
+            if (ev.allDay || ev.end.indexOf("T") === -1) {
+                var evDate = _parseEventDate(ev.start);
+                if (evDate.toDateString() === now.toDateString() ||
+                    evDate > now)
+                    return ev;
+                continue;
+            }
+            var endDt = _parseEventDate(ev.end);
+            if (endDt > now) return ev;
+        }
+        return null;
+    }
+
     function nextEventSummary() {
+        void(_pillTick);
         if (isLoading) return "Cal ...";
         if (hasError) return "Cal \u2013";
         if (events.length === 0) return "No events";
-        var ev = events[0];
+        var ev = _findCurrentOrNextEvent();
+        if (!ev) return "No events";
         var timeStr = formatEventTime(ev);
         var dayPrefix = eventDayPrefix(ev);
-        // Truncate title for bar pill
         var maxTitle = 20;
         var title = ev.title.length > maxTitle ? ev.title.substring(0, maxTitle - 2) + "\u2026" : ev.title;
         return dayPrefix + timeStr + " " + title;
@@ -589,7 +636,21 @@ PluginComponent {
 
     // ── Popout panel ────────────────────────────────────────────────
     popoutContent: Component {
+        Item {
+            implicitWidth: root.popoutWidth
+            implicitHeight: root.popoutHeight
+
+        Flickable {
+            anchors.fill: parent
+            contentWidth: parent.width
+            contentHeight: contentColumn.height
+            clip: true
+            flickableDirection: Flickable.VerticalFlick
+            boundsBehavior: Flickable.StopAtBounds
+
         Column {
+            id: contentColumn
+            width: parent.width
             spacing: Theme.spacingL
             Component.onCompleted: { root.showAddForm = false; root.showEditForm = false; }
 
@@ -1706,6 +1767,36 @@ PluginComponent {
                                         elide: Text.ElideRight
                                     }
 
+                                    Row {
+                                        id: meetLinkRow
+                                        spacing: Theme.spacingXS
+                                        visible: root.showMeetLink && (modelData.meetLink || "") !== ""
+                                        width: parent.width
+
+                                        DankIcon {
+                                            name: "videocam"
+                                            size: 12
+                                            color: Theme.primary
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+
+                                        StyledText {
+                                            text: "Join Meet"
+                                            color: Theme.primary
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            font.weight: Font.Medium
+                                        }
+                                    }
+
+                                    StyledText {
+                                        text: modelData.rsvpAccepted + "/" + modelData.rsvpTotal + " accepted"
+                                        color: Theme.surfaceVariantText
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        visible: root.showRsvp && (modelData.rsvpTotal || 0) > 0
+                                        width: parent.width
+                                        elide: Text.ElideRight
+                                    }
+
                                     StyledText {
                                         text: root.calendarNameForIndex(modelData.calendarIndex)
                                         color: Theme.surfaceVariantText
@@ -1725,11 +1816,31 @@ PluginComponent {
                                         if (modelData.filename) root.openEditForm(modelData);
                                     }
                                 }
+
+                                MouseArea {
+                                    x: meetLinkRow.parent.x + meetLinkRow.x
+                                    y: meetLinkRow.parent.y + meetLinkRow.y
+                                    width: meetLinkRow.width
+                                    height: meetLinkRow.height
+                                    visible: meetLinkRow.visible
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        if (root.meetLinkAction === "open")
+                                            Qt.openUrlExternally(modelData.meetLink);
+                                        else {
+                                            clipboardHelper.text = modelData.meetLink;
+                                            clipboardHelper.selectAll();
+                                            clipboardHelper.copy();
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
+        }
+        }
         }
     }
 
