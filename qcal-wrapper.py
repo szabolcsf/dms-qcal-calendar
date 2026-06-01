@@ -15,7 +15,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 QCAL_BIN = os.path.join(SCRIPT_DIR, "qcal", "qcal")
@@ -216,8 +216,9 @@ def cmd_list(args):
     # Start from yesterday midnight — qcal has an off-by-one with all-day events
     start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
     end = now + timedelta(days=args.days)
-    start_str = start.strftime("%Y%m%dT%H%M%S")
-    end_str = end.strftime("%Y%m%dT%H%M%S")
+    # qcal interprets -s/-e as UTC; convert the local window edges to UTC.
+    start_str = start.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    end_str = end.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S")
 
     # Query each calendar individually to get filenames and calendar indices
     config = load_qcal_config()
@@ -603,7 +604,8 @@ def cmd_edit(args):
 
 def cmd_notify(args):
     """Check for events starting within N minutes and send desktop notification."""
-    now = datetime.now()
+    # qcal interprets -s/-e as UTC, so build the query window in UTC.
+    now = datetime.now(timezone.utc)
     end = now + timedelta(minutes=args.minutes)
     start_str = now.strftime("%Y%m%dT%H%M%S")
     end_str = end.strftime("%Y%m%dT%H%M%S")
