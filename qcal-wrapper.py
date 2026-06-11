@@ -15,7 +15,12 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - py<3.9
+    ZoneInfo = None
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 QCAL_BIN = os.path.join(SCRIPT_DIR, "qcal", "qcal")
@@ -210,6 +215,484 @@ def parse_calendars(output: str) -> list[dict]:
     return cals
 
 
+# ────────────────────────────────────────────────────────────────────
+# ICS feed support (read-only "secret address in iCal format" URLs)
+#
+# Google/Outlook/etc. expose a private .ics URL that returns a full
+# VCALENDAR. qcal only speaks CalDAV, so these feeds are fetched and
+# parsed here, then merged into the event list as read-only calendars.
+# ────────────────────────────────────────────────────────────────────
+
+_WEEKDAYS = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
+
+
+def load_ics_calendars(config: dict) -> list[dict]:
+    """ICS feeds from config: [{"Url": ..., "Name": ...}, ...]."""
+    cals = config.get("IcsCalendars", [])
+    return cals if isinstance(cals, list) else []
+
+
+def _config_zone(config: dict):
+    """ZoneInfo for the configured display timezone (None if unavailable)."""
+    name = config.get("Timezone", "") or "UTC"
+    if ZoneInfo is None:
+        return None
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        return None
+
+
+def fetch_ics(url: str) -> str:
+    """Download an ICS feed. Returns text, or "" on failure."""
+    import urllib.request
+    import ssl
+
+    ctx = ssl.create_default_context()
+    # webcal:// is just http(s) in disguise
+    if url.startswith("webcal://"):
+        url = "https://" + url[len("webcal://"):]
+    req = urllib.request.Request(url, headers={"User-Agent": "qcal-dms/1.0"})
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=20) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        print(json.dumps({"error": f"ICS fetch failed: {e}"}), file=sys.stderr)
+        return ""
+
+
+def _unfold_ics(text: str) -> list[str]:
+    """Undo RFC 5545 line folding (continuation lines start with space/tab)."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    out: list[str] = []
+    for line in text.split("\n"):
+        if line[:1] in (" ", "\t") and out:
+            out[-1] += line[1:]
+        else:
+            out.append(line)
+    return out
+
+
+def _parse_prop(line: str):
+    """Split a content line into (NAME, params_dict, value)."""
+    idx = line.find(":")
+    if idx == -1:
+        return None
+    head, value = line[:idx], line[idx + 1:]
+    parts = head.split(";")
+    name = parts[0].upper()
+    params = {}
+    for p in parts[1:]:
+        if "=" in p:
+            k, v = p.split("=", 1)
+            params[k.upper()] = v.strip('"')
+    return name, params, value
+
+
+def _unescape_text(v: str) -> str:
+    return (v.replace("\\N", "\n").replace("\\n", "\n")
+             .replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\"))
+
+
+def _safe_zone(tzid: str):
+    if ZoneInfo is None or not tzid:
+        return None
+    try:
+        return ZoneInfo(tzid)
+    except Exception:
+        return None
+
+
+def _parse_ics_dt(value: str, params: dict, config_zone):
+    """Parse an ICS date/datetime value.
+
+    Returns (naive datetime in the display timezone, is_all_day).
+    Floating times (no Z, no TZID) are treated as already-local.
+    """
+    value = value.strip()
+    is_date = params.get("VALUE") == "DATE" or ("T" not in value and len(value) >= 8)
+    if is_date:
+        return datetime.strptime(value[:8], "%Y%m%d"), True
+
+    base = value.rstrip("Z")
+    try:
+        dt = datetime.strptime(base[:15], "%Y%m%dT%H%M%S")
+    except ValueError:
+        try:
+            dt = datetime.strptime(base[:13], "%Y%m%dT%H%M")
+        except ValueError:
+            return datetime.strptime(value[:8], "%Y%m%d"), True
+
+    src_zone = None
+    if value.endswith("Z"):
+        src_zone = timezone.utc
+    else:
+        src_zone = _safe_zone(params.get("TZID", ""))
+
+    if src_zone is not None and config_zone is not None:
+        dt = dt.replace(tzinfo=src_zone).astimezone(config_zone).replace(tzinfo=None)
+    return dt, False
+
+
+def _parse_duration(value: str) -> timedelta:
+    """Parse an ICS DURATION (e.g. PT1H30M, P1D, P1DT2H). Best-effort."""
+    m = re.match(
+        r"^[+-]?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$",
+        value.strip(),
+    )
+    if not m:
+        return timedelta(0)
+    w, d, h, mi, s = (int(x) if x else 0 for x in m.groups())
+    td = timedelta(weeks=w, days=d, hours=h, minutes=mi, seconds=s)
+    return -td if value.strip().startswith("-") else td
+
+
+def _parse_rrule(value: str) -> dict:
+    out = {}
+    for kv in value.split(";"):
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            out[k.upper()] = v
+    return out
+
+
+def _nth_weekday(year: int, month: int, weekday: int, n: int):
+    """Date of the nth (1-based; negative from end) weekday in a month."""
+    import calendar
+    days = [d for d in range(1, calendar.monthrange(year, month)[1] + 1)
+            if datetime(year, month, d).weekday() == weekday]
+    if not days:
+        return None
+    try:
+        return days[n - 1] if n > 0 else days[n]
+    except IndexError:
+        return None
+
+
+def _add_months(dt: datetime, months: int) -> datetime:
+    m = dt.month - 1 + months
+    year = dt.year + m // 12
+    month = m % 12 + 1
+    import calendar
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    return dt.replace(year=year, month=month, day=day)
+
+
+def _expand_rrule(dtstart: datetime, rrule: dict, window_end: datetime,
+                  config_zone) -> list[datetime]:
+    """Expand a recurrence rule into start datetimes up to window_end.
+
+    Handles the common cases (DAILY/WEEKLY/MONTHLY/YEARLY, INTERVAL, COUNT,
+    UNTIL, weekly BYDAY, monthly BYDAY/BYMONTHDAY). Unknown rules fall back
+    to the single DTSTART occurrence.
+    """
+    freq = rrule.get("FREQ", "").upper()
+    interval = max(1, int(rrule.get("INTERVAL", "1") or "1"))
+    count = int(rrule["COUNT"]) if rrule.get("COUNT", "").isdigit() else None
+
+    until = None
+    if "UNTIL" in rrule:
+        u = rrule["UNTIL"]
+        try:
+            if u.endswith("Z"):
+                until = (datetime.strptime(u, "%Y%m%dT%H%M%SZ")
+                         .replace(tzinfo=timezone.utc))
+                if config_zone is not None:
+                    until = until.astimezone(config_zone)
+                until = until.replace(tzinfo=None)
+            elif "T" in u:
+                until = datetime.strptime(u[:15], "%Y%m%dT%H%M%S")
+            else:
+                until = datetime.strptime(u[:8], "%Y%m%d").replace(
+                    hour=23, minute=59, second=59)
+        except ValueError:
+            until = None
+
+    hard_stop = window_end + timedelta(days=1)
+    occurrences: list[datetime] = []
+
+    def emit(dt: datetime) -> bool:
+        """Append dt if within bounds. Returns False when the series ends."""
+        if until is not None and dt > until:
+            return False
+        if dt > hard_stop:
+            return False
+        occurrences.append(dt)
+        return not (count is not None and len(occurrences) >= count)
+
+    byday = rrule.get("BYDAY", "")
+
+    if freq == "DAILY":
+        cur = dtstart
+        guard = 0
+        while emit(cur) and guard < 5000:
+            cur += timedelta(days=interval)
+            guard += 1
+
+    elif freq == "WEEKLY":
+        weekdays = []
+        for tok in byday.split(","):
+            tok = tok.strip()[-2:].upper()
+            if tok in _WEEKDAYS:
+                weekdays.append(_WEEKDAYS[tok])
+        if not weekdays:
+            weekdays = [dtstart.weekday()]
+        weekdays = sorted(set(weekdays))
+        # Monday of dtstart's week
+        week0 = dtstart - timedelta(days=dtstart.weekday())
+        guard = 0
+        running = True
+        while running and guard < 1000:
+            for wd in weekdays:
+                cand = (week0 + timedelta(weeks=interval * guard, days=wd)).replace(
+                    hour=dtstart.hour, minute=dtstart.minute,
+                    second=dtstart.second)
+                if cand < dtstart:
+                    continue
+                if not emit(cand):
+                    running = False
+                    break
+            guard += 1
+
+    elif freq == "MONTHLY":
+        guard = 0
+        running = True
+        # BYDAY with ordinal, e.g. 2MO or -1FR
+        bd_m = re.match(r"^([+-]?\d+)?([A-Z]{2})$", byday.strip()) if byday else None
+        bymonthday = rrule.get("BYMONTHDAY", "")
+        while running and guard < 600:
+            anchor = _add_months(dtstart, interval * guard)
+            cand = None
+            if bd_m and bd_m.group(1):
+                wd = _WEEKDAYS.get(bd_m.group(2))
+                n = int(bd_m.group(1))
+                if wd is not None:
+                    day = _nth_weekday(anchor.year, anchor.month, wd, n)
+                    if day:
+                        cand = anchor.replace(day=day)
+            elif bymonthday.lstrip("-").isdigit():
+                import calendar
+                md = int(bymonthday)
+                dim = calendar.monthrange(anchor.year, anchor.month)[1]
+                day = md if md > 0 else dim + md + 1
+                if 1 <= day <= dim:
+                    cand = anchor.replace(day=day)
+            else:
+                cand = anchor
+            if cand is not None and cand >= dtstart:
+                if not emit(cand):
+                    running = False
+            guard += 1
+
+    elif freq == "YEARLY":
+        guard = 0
+        while guard < 200:
+            try:
+                cand = dtstart.replace(year=dtstart.year + interval * guard)
+            except ValueError:  # Feb 29
+                guard += 1
+                continue
+            if not emit(cand):
+                break
+            guard += 1
+
+    else:
+        occurrences.append(dtstart)
+
+    return occurrences
+
+
+def _ics_key(dt: datetime, all_day: bool) -> str:
+    """Stable key for matching EXDATE / RECURRENCE-ID occurrences."""
+    return dt.strftime("%Y-%m-%d") if all_day else dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def parse_ics(text: str, window_start: datetime, window_end: datetime,
+              config: dict) -> list[dict]:
+    """Parse an ICS feed into event dicts within [window_start, window_end].
+
+    Recurring events are expanded; EXDATE exclusions and RECURRENCE-ID
+    overrides are honored. Events carry no 'filename' so the UI treats
+    them as read-only.
+    """
+    config_zone = _config_zone(config)
+    lines = _unfold_ics(text)
+
+    # First pass: collect raw VEVENT components.
+    components: list[dict] = []
+    cur = None
+    in_event = False
+    for line in lines:
+        up = line.upper()
+        if up == "BEGIN:VEVENT":
+            in_event = True
+            cur = {"props": [], "exdates": []}
+            continue
+        if up == "END:VEVENT":
+            if cur is not None:
+                components.append(cur)
+            in_event = False
+            cur = None
+            continue
+        if not in_event or cur is None:
+            continue
+        parsed = _parse_prop(line)
+        if not parsed:
+            continue
+        name, params, value = parsed
+        if name == "EXDATE":
+            for v in value.split(","):
+                dt, ad = _parse_ics_dt(v, params, config_zone)
+                cur["exdates"].append(_ics_key(dt, ad))
+        else:
+            cur["props"].append((name, params, value))
+
+    def get(props, name):
+        for n, p, v in props:
+            if n == name:
+                return p, v
+        return None, None
+
+    # Separate masters from RECURRENCE-ID overrides (by UID).
+    overrides: dict[str, set] = {}
+    override_events: list[dict] = []
+    masters: list[dict] = []
+    for comp in components:
+        props = comp["props"]
+        _, uid = get(props, "UID")
+        rid_params, rid_val = get(props, "RECURRENCE-ID")
+        if rid_val is not None:
+            rdt, rad = _parse_ics_dt(rid_val, rid_params, config_zone)
+            if uid:
+                overrides.setdefault(uid, set()).add(_ics_key(rdt, rad))
+            override_events.append(comp)
+        else:
+            masters.append(comp)
+
+    events: list[dict] = []
+
+    def build_event(props, start_dt, all_day, dur=None, end_dt=None):
+        sp, sval = get(props, "SUMMARY")
+        title = _unescape_text(sval).strip() if sval else "(no title)"
+        _, locv = get(props, "LOCATION")
+        _, descv = get(props, "DESCRIPTION")
+
+        if all_day:
+            start_iso = start_dt.strftime("%Y-%m-%d")
+            if end_dt is not None:
+                end_iso = end_dt.strftime("%Y-%m-%d")
+            elif dur is not None and dur > timedelta(0):
+                end_iso = (start_dt + dur).strftime("%Y-%m-%d")
+            else:
+                end_iso = (start_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+        else:
+            start_iso = start_dt.isoformat()
+            if end_dt is not None:
+                end_iso = end_dt.isoformat()
+            elif dur is not None:
+                end_iso = (start_dt + dur).isoformat()
+            else:
+                end_iso = start_iso
+        return {
+            "title": title,
+            "start": start_iso,
+            "end": end_iso,
+            "allDay": all_day,
+            "location": _unescape_text(locv).strip() if locv else "",
+            "description": _unescape_text(descv).strip() if descv else "",
+        }
+
+    def within(start_dt, all_day):
+        # Compare on the same day granularity the list filter uses.
+        return window_start <= start_dt <= window_end or (
+            all_day and start_dt.date() >= window_start.date()
+            and start_dt.date() <= window_end.date())
+
+    for comp in masters:
+        props = comp["props"]
+        dt_params, dt_val = get(props, "DTSTART")
+        if not dt_val:
+            continue
+        start_dt, all_day = _parse_ics_dt(dt_val, dt_params, config_zone)
+
+        # Duration from DTEND or DURATION.
+        end_params, end_val = get(props, "DTEND")
+        dur = None
+        base_end = None
+        if end_val:
+            end_dt, _ = _parse_ics_dt(end_val, end_params, config_zone)
+            base_end = end_dt
+            dur = end_dt - start_dt
+        else:
+            _, dval = get(props, "DURATION")
+            if dval:
+                dur = _parse_duration(dval)
+
+        _, rr_val = get(props, "RRULE")
+        _, uid = get(props, "UID")
+        skip = overrides.get(uid, set()) if uid else set()
+        skip = skip | set(comp["exdates"])
+
+        if rr_val:
+            starts = _expand_rrule(start_dt, _parse_rrule(rr_val),
+                                   window_end, config_zone)
+            for s in starts:
+                if _ics_key(s, all_day) in skip:
+                    continue
+                if not within(s, all_day):
+                    continue
+                e_end = (s + dur) if (dur is not None and not all_day) else None
+                ad_end = (s + dur) if (dur is not None and all_day) else None
+                events.append(build_event(props, s, all_day,
+                                          end_dt=e_end or ad_end))
+        else:
+            if _ics_key(start_dt, all_day) in skip:
+                continue
+            if within(start_dt, all_day):
+                events.append(build_event(props, start_dt, all_day,
+                                          end_dt=base_end, dur=dur))
+
+    # Add RECURRENCE-ID override instances as standalone events.
+    for comp in override_events:
+        props = comp["props"]
+        dt_params, dt_val = get(props, "DTSTART")
+        if not dt_val:
+            continue
+        start_dt, all_day = _parse_ics_dt(dt_val, dt_params, config_zone)
+        if not within(start_dt, all_day):
+            continue
+        end_params, end_val = get(props, "DTEND")
+        base_end = None
+        if end_val:
+            base_end, _ = _parse_ics_dt(end_val, end_params, config_zone)
+        events.append(build_event(props, start_dt, all_day, end_dt=base_end))
+
+    return events
+
+
+def collect_ics_events(config: dict, window_start: datetime,
+                       window_end: datetime, base_index: int) -> list[dict]:
+    """Fetch & parse every configured ICS feed, tagging calendar indices."""
+    all_events = []
+    for offset, cal in enumerate(load_ics_calendars(config)):
+        url = cal.get("Url", "")
+        if not url:
+            continue
+        text = fetch_ics(url)
+        if not text:
+            continue
+        try:
+            evs = parse_ics(text, window_start, window_end, config)
+        except Exception as e:
+            print(json.dumps({"error": f"ICS parse failed: {e}"}),
+                  file=sys.stderr)
+            continue
+        for ev in evs:
+            ev["calendarIndex"] = base_index + offset
+        all_events.extend(evs)
+    return all_events
+
+
 def cmd_list(args):
     """List upcoming events."""
     now = datetime.now()
@@ -232,6 +715,9 @@ def cmd_list(args):
         for ev in events:
             ev["calendarIndex"] = cal_idx
         all_events.extend(events)
+
+    # Merge in read-only ICS feeds (indices continue after the CalDAV ones).
+    all_events.extend(collect_ics_events(config, start, end, num_cals))
 
     # Filter out yesterday's events that crept in from the off-by-one workaround
     today_str = now.strftime("%Y-%m-%d")
@@ -407,6 +893,16 @@ def cmd_calendars(args):
     """List configured calendars with display names."""
     config = load_qcal_config()
     cals = get_calendar_names(config)
+    # Append ICS feeds as read-only calendars, indices continuing after CalDAV.
+    base = len(cals)
+    for offset, ical in enumerate(load_ics_calendars(config)):
+        url = ical.get("Url", "")
+        name = ical.get("Name", "")
+        if not name:
+            segs = [s for s in url.split("?")[0].rstrip("/").split("/") if s]
+            name = (segs[-1] if segs else f"ICS {offset}").replace(".ics", "")
+        cals.append({"index": base + offset, "name": name, "url": url,
+                     "readOnly": True})
     json.dump({"calendars": cals}, sys.stdout)
 
 
@@ -882,6 +1378,73 @@ def cmd_discover(args):
     )
 
 
+def _write_qcal_config(cfg: dict):
+    config_dir = os.path.join(os.environ.get("HOME", ""), ".config", "qcal")
+    os.makedirs(config_dir, exist_ok=True)
+    with open(os.path.join(config_dir, "config.json"), "w") as f:
+        json.dump(cfg, f, indent=4)
+
+
+def cmd_add_ics(args):
+    """Add a read-only ICS feed URL to the config."""
+    cfg = load_qcal_config()
+    feeds = cfg.get("IcsCalendars", [])
+    if not isinstance(feeds, list):
+        feeds = []
+    if any(f.get("Url") == args.url for f in feeds):
+        json.dump({"success": False, "error": "Feed already configured"}, sys.stdout)
+        return
+    # Validate by fetching once so we fail loudly on a bad URL.
+    text = fetch_ics(args.url)
+    if "BEGIN:VCALENDAR" not in text:
+        json.dump({"success": False,
+                   "error": "URL did not return a valid ICS feed"}, sys.stdout)
+        return
+    name = args.name
+    if not name:
+        m = re.search(r"(?mi)^X-WR-CALNAME:(.+)$", text)
+        name = m.group(1).strip() if m else ""
+    feeds.append({"Url": args.url, "Name": name})
+    cfg["IcsCalendars"] = feeds
+    cfg.setdefault("DefaultNumDays", 14)
+    _write_qcal_config(cfg)
+    json.dump({"success": True, "name": name, "error": ""}, sys.stdout)
+
+
+def cmd_remove_ics(args):
+    """Remove an ICS feed by index (from list-ics) or by URL."""
+    cfg = load_qcal_config()
+    feeds = cfg.get("IcsCalendars", [])
+    if not isinstance(feeds, list) or not feeds:
+        json.dump({"success": False, "error": "No ICS feeds configured"}, sys.stdout)
+        return
+    target = args.feed
+    removed = None
+    if target.isdigit() and int(target) < len(feeds):
+        removed = feeds.pop(int(target))
+    else:
+        for i, f in enumerate(feeds):
+            if f.get("Url") == target:
+                removed = feeds.pop(i)
+                break
+    if removed is None:
+        json.dump({"success": False, "error": "Feed not found"}, sys.stdout)
+        return
+    cfg["IcsCalendars"] = feeds
+    _write_qcal_config(cfg)
+    json.dump({"success": True, "removed": removed.get("Url", ""), "error": ""},
+              sys.stdout)
+
+
+def cmd_list_ics(args):
+    """List configured ICS feeds."""
+    cfg = load_qcal_config()
+    feeds = load_ics_calendars(cfg)
+    json.dump({"feeds": [{"index": i, "url": f.get("Url", ""),
+                          "name": f.get("Name", "")}
+                         for i, f in enumerate(feeds)]}, sys.stdout)
+
+
 def main():
     parser = argparse.ArgumentParser(description="qcal JSON wrapper")
     sub = parser.add_subparsers(dest="command")
@@ -920,6 +1483,15 @@ def main():
     p_notify = sub.add_parser("notify")
     p_notify.add_argument("--minutes", type=int, default=15)
 
+    p_add_ics = sub.add_parser("add-ics")
+    p_add_ics.add_argument("url", help="Private/secret ICS feed URL")
+    p_add_ics.add_argument("--name", default="", help="Display name (optional)")
+
+    p_rm_ics = sub.add_parser("remove-ics")
+    p_rm_ics.add_argument("feed", help="Feed index (from list-ics) or URL")
+
+    sub.add_parser("list-ics")
+
     args = parser.parse_args()
 
     if args.command == "discover":
@@ -936,6 +1508,12 @@ def main():
         cmd_edit(args)
     elif args.command == "notify":
         cmd_notify(args)
+    elif args.command == "add-ics":
+        cmd_add_ics(args)
+    elif args.command == "remove-ics":
+        cmd_remove_ics(args)
+    elif args.command == "list-ics":
+        cmd_list_ics(args)
     else:
         parser.print_help()
 

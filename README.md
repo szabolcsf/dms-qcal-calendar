@@ -11,6 +11,7 @@ A DankBar widget that shows upcoming CalDAV calendar events with a full popout p
 
 - Works with iCloud, Google, Nextcloud, and any CalDAV server
 - Auto-discovery of all calendars under a CalDAV account
+- Read-only ICS feed support (private "secret address in iCal format" URLs) — useful for Google/Outlook calendars that no longer allow basic-auth CalDAV
 - GNOME Keyring integration (falls back to plaintext config if unavailable)
 - Create, edit, and delete events directly from the popout
 - Desktop notifications before upcoming events
@@ -45,6 +46,26 @@ A DankBar widget that shows upcoming CalDAV calendar events with a full popout p
 | Notify before (minutes) | How far in advance to notify | 15 |
 
 Multiple CalDAV providers can be configured by editing `~/.config/qcal/config.json` directly.
+
+## ICS feeds (read-only)
+
+Some providers (notably Google since its March 2025 basic-auth CalDAV shutdown) no longer work with username/password CalDAV. For those, use the calendar's **private ICS URL** ("secret address in iCal format"):
+
+- **Google Calendar** → Settings → *Settings for my calendars* → pick the calendar → *Integrate calendar* → copy **Secret address in iCal format**.
+- **Outlook/Office 365** → calendar sharing → *Publish a calendar* → copy the **ICS** link.
+
+Add it with the wrapper:
+
+```bash
+# from the plugin directory (or the deployed ~/.config/DankMaterialShell/plugins/qcalCalendar)
+python3 qcal-wrapper.py add-ics "https://calendar.google.com/calendar/ical/.../basic.ics" --name "Work"
+python3 qcal-wrapper.py list-ics              # show configured feeds
+python3 qcal-wrapper.py remove-ics 0          # remove by index (or pass the URL)
+```
+
+Feeds are stored under an `IcsCalendars` array in `~/.config/qcal/config.json` and appear in the popout as read-only calendars (no add/edit/delete). Recurring events are expanded locally — including weekly `BYDAY` rules, `EXDATE` exclusions, and per-instance `RECURRENCE-ID` overrides — and all times are converted to your configured `Timezone`.
+
+> The URL is a secret bearer token: anyone with it can read your calendar. Keep `config.json` private; regenerate ("reset") the link from the provider if it leaks.
 
 ## Dependencies
 
