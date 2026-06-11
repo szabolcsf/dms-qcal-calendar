@@ -33,7 +33,6 @@ PluginSettings {
         label: "Password"
         description: "App-specific password for your CalDAV account"
         placeholder: "Enter password..."
-        password: true
     }
 
     StyledText {
