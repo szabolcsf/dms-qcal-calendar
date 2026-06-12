@@ -719,9 +719,20 @@ def cmd_list(args):
     # Merge in read-only ICS feeds (indices continue after the CalDAV ones).
     all_events.extend(collect_ics_events(config, start, end, num_cals))
 
-    # Filter out yesterday's events that crept in from the off-by-one workaround
+    # Filter out past events: yesterday's all-day events (off-by-one workaround)
+    # and timed events whose end time has already passed.
     today_str = now.strftime("%Y-%m-%d")
-    all_events = [e for e in all_events if e["start"] >= today_str]
+    now_iso = now.isoformat()
+
+    def is_upcoming(e):
+        if e["allDay"]:
+            return e["start"] >= today_str
+        # For timed events keep if the end time hasn't passed yet.
+        # Fall back to start time when end equals start (no explicit duration).
+        cutoff = e["end"] if e["end"] != e["start"] else e["start"]
+        return cutoff > now_iso
+
+    all_events = [e for e in all_events if is_upcoming(e)]
     # Sort by start time
     all_events.sort(key=lambda e: e["start"])
     json.dump({"events": all_events, "count": len(all_events)}, sys.stdout)
